@@ -4,6 +4,10 @@ Detect package dependencies hallucinated by AI coding tools before they reach yo
 
 AI assistants can suggest package names that sound plausible but do not exist. A package may later be registered under that name by an attacker. `ai-dependency-guard` checks references against public npm and PyPI registries; it does not install or execute packages.
 
+![15-second terminal demo](docs/demo.gif)
+
+_The demo uses offline mode and never installs or executes a package._
+
 > A package existing in a registry does not mean that it is safe.
 
 ## Quick start
