@@ -1,0 +1,84 @@
+name: AI Dependency Guard
+description: Detect package dependencies hallucinated by AI coding tools.
+author: ai-dependency-guard contributors
+branding:
+  icon: shield
+  color: blue
+
+inputs:
+  path:
+    description: Repository path to scan.
+    required: false
+    default: "."
+  offline:
+    description: Skip registry requests and report lookup status as unknown.
+    required: false
+    default: "false"
+  fail-on:
+    description: Use any to fail when findings exist, or none to report only.
+    required: false
+    default: any
+  ignore-paths:
+    description: Comma-separated relative paths or globs to ignore.
+    required: false
+    default: ""
+  ignore-packages:
+    description: Comma-separated package names to ignore.
+    required: false
+    default: ""
+  cache-file:
+    description: Optional explicit path for the registry cache.
+    required: false
+    default: ""
+  sarif-file:
+    description: Optional path where a SARIF 2.1.0 report should be written.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Scan dependencies
+      shell: bash
+      env:
+        PYTHONPATH: ${{ github.action_path }}/src
+        INPUT_PATH: ${{ inputs.path }}
+        INPUT_OFFLINE: ${{ inputs.offline }}
+        INPUT_FAIL_ON: ${{ inputs['fail-on'] }}
+        INPUT_IGNORE_PATHS: ${{ inputs['ignore-paths'] }}
+        INPUT_IGNORE_PACKAGES: ${{ inputs['ignore-packages'] }}
+        INPUT_CACHE_FILE: ${{ inputs['cache-file'] }}
+        INPUT_SARIF_FILE: ${{ inputs['sarif-file'] }}
+      run: |
+        set -euo pipefail
+
+        cache_file="$INPUT_CACHE_FILE"
+        if [[ -z "$cache_file" ]]; then
+          cache_file="${RUNNER_TEMP}/ai-dependency-guard-cache.json"
+        fi
+
+        args=(scan "$INPUT_PATH" --github-annotations --fail-on "$INPUT_FAIL_ON" --cache-file "$cache_file")
+
+        if [[ -n "$INPUT_SARIF_FILE" ]]; then
+          args+=(--sarif-file "$INPUT_SARIF_FILE")
+        fi
+
+        if [[ "$INPUT_OFFLINE" == "true" ]]; then
+          args+=(--offline)
+        fi
+
+        if [[ -n "$INPUT_IGNORE_PATHS" ]]; then
+          IFS=',' read -ra ignored_paths <<< "$INPUT_IGNORE_PATHS"
+          for ignored_path in "${ignored_paths[@]}"; do
+            args+=(--ignore-path "$ignored_path")
+          done
+        fi
+
+        if [[ -n "$INPUT_IGNORE_PACKAGES" ]]; then
+          IFS=',' read -ra ignored_packages <<< "$INPUT_IGNORE_PACKAGES"
+          for ignored_package in "${ignored_packages[@]}"; do
+            args+=(--ignore-package "$ignored_package")
+          done
+        fi
+
+        python -m ai_dependency_guard "${args[@]}"
