@@ -15,6 +15,7 @@ class OutputTests(unittest.TestCase):
             status="not_found",
             reason="Package was not found in the npm registry.",
             suggestion="Verify the package name before installing it.",
+            version="v1.2.3",
         )
 
     def test_text_output_contains_location_and_reason(self):
@@ -22,6 +23,7 @@ class OutputTests(unittest.TestCase):
 
         self.assertIn("README.md:3", output)
         self.assertIn("definitely-not-a-real-package-12345", output)
+        self.assertIn("@v1.2.3", output)
         self.assertIn("not found", output.lower())
 
     def test_json_output_is_machine_readable(self):
@@ -29,6 +31,7 @@ class OutputTests(unittest.TestCase):
 
         self.assertEqual(payload["summary"]["total"], 1)
         self.assertEqual(payload["findings"][0]["ecosystem"], "npm")
+        self.assertEqual(payload["findings"][0]["version"], "v1.2.3")
 
     def test_sarif_output_has_valid_core_shape(self):
         payload = json.loads(render_sarif([self.finding]))
@@ -36,6 +39,10 @@ class OutputTests(unittest.TestCase):
         self.assertEqual(payload["version"], "2.1.0")
         self.assertEqual(payload["runs"][0]["tool"]["driver"]["name"], "ai-dependency-guard")
         self.assertEqual(payload["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["region"]["startLine"], 3)
+        self.assertIn(
+            "definitely-not-a-real-package-12345@v1.2.3",
+            payload["runs"][0]["results"][0]["message"]["text"],
+        )
 
 
 if __name__ == "__main__":

@@ -59,6 +59,32 @@ class ScannerTests(unittest.TestCase):
             self.assertEqual(result.findings[0].status, "unknown")
             self.assertIn("offline", result.findings[0].reason.lower())
 
+    def test_go_module_version_reaches_scanner_findings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "go.mod").write_text(
+                "module example.com/demo\n\n"
+                "go 1.24\n\n"
+                "require example.com/missing-ai v1.2.3\n",
+                encoding="utf-8",
+            )
+            registry = FakeRegistry(
+                {
+                    ("go", "example.com/missing-ai"): RegistryResult(
+                        "not_found", "Module was not found in the Go module proxy."
+                    )
+                }
+            )
+
+            result = scan_path(root, registry=registry)
+
+            self.assertEqual(len(result.findings), 1)
+            finding = result.findings[0]
+            self.assertEqual(finding.package_name, "example.com/missing-ai")
+            self.assertEqual(finding.version, "v1.2.3")
+            self.assertEqual(finding.path, "go.mod")
+            self.assertEqual(finding.line, 5)
+
     def test_ignores_git_and_node_modules_directories(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

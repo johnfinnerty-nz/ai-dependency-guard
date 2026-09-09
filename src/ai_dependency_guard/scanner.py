@@ -90,6 +90,7 @@ def _finding_for_reference(reference, result: RegistryResult) -> Finding:
         reason=result.message,
         suggestion=suggestion,
         severity=severity,
+        version=reference.version,
     )
 
 

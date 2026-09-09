@@ -14,9 +14,12 @@ def render_text(findings: list[Finding]) -> str:
 
     lines = [f"Found {len(findings)} dependency finding(s):"]
     for finding in findings:
+        package = finding.package_name
+        if finding.version:
+            package = f"{package}@{finding.version}"
         lines.append(
             f"[{finding.severity.upper()}] {finding.path}:{finding.line} "
-            f"{finding.ecosystem}:{finding.package_name}"
+            f"{finding.ecosystem}:{package}"
         )
         lines.append(f"  Reason: {finding.reason}")
         lines.append(f"  Suggestion: {finding.suggestion}")
@@ -43,7 +46,13 @@ def render_sarif(findings: list[Finding]) -> str:
             {
                 "ruleId": f"{finding.ecosystem}/{finding.status}",
                 "level": finding.severity,
-                "message": {"text": f"{finding.reason} {finding.suggestion}"},
+                "message": {
+                    "text": (
+                        f"{finding.ecosystem}:{finding.package_name}"
+                        f"{('@' + finding.version) if finding.version else ''}: "
+                        f"{finding.reason} {finding.suggestion}"
+                    )
+                },
                 "locations": [
                     {
                         "physicalLocation": {

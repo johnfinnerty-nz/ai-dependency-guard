@@ -311,6 +311,29 @@ def _extract_pyproject(path: str, content: str) -> list[PackageReference]:
 def _extract_go_mod(path: str, content: str) -> list[PackageReference]:
     """Extract registry-backed module requirements without invoking Go."""
 
+    local_replacements: set[str] = set()
+    in_replace_block = False
+    for line in content.splitlines():
+        stripped = line.split("//", 1)[0].strip()
+        if not stripped:
+            continue
+        if stripped == "replace (":
+            in_replace_block = True
+            continue
+        if stripped == ")" and in_replace_block:
+            in_replace_block = False
+            continue
+        if stripped.startswith("replace "):
+            stripped = stripped.removeprefix("replace ").strip()
+        elif not in_replace_block:
+            continue
+        if "=>" not in stripped:
+            continue
+        original, replacement = (part.strip() for part in stripped.split("=>", 1))
+        replacement_target = replacement.split()[0]
+        if replacement_target.startswith((".", "/")):
+            local_replacements.add(original.split()[0])
+
     references: list[PackageReference] = []
     in_require_block = False
     for line_number, line in enumerate(content.splitlines(), start=1):
@@ -343,9 +366,17 @@ def _extract_go_mod(path: str, content: str) -> list[PackageReference]:
         match = _GO_MODULE.match(stripped)
         if not match:
             raise ExtractionError(f"Malformed module requirement at line {line_number}.")
-        references.append(
-            PackageReference("go", match.group("name"), path, line_number, "require")
-        )
+        if match.group("name") not in local_replacements:
+            references.append(
+                PackageReference(
+                    "go",
+                    match.group("name"),
+                    path,
+                    line_number,
+                    "require",
+                    match.group("version"),
+                )
+            )
     if in_require_block:
         raise ExtractionError("Malformed require block: missing closing parenthesis.")
     return references

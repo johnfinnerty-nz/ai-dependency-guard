@@ -10,6 +10,7 @@ class PackageReference:
     path: str
     line: int
     source: str = ""
+    version: str = ""
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,7 @@ class Finding:
     reason: str
     suggestion: str
     severity: str = "error"
+    version: str = ""
 
 
 @dataclass
