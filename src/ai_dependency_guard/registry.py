@@ -17,6 +17,7 @@ class PublicRegistryClient:
     _BASE_URLS = {
         "npm": "https://registry.npmjs.org/",
         "pypi": "https://pypi.org/pypi/",
+        "go": "https://proxy.golang.org/",
     }
 
     def __init__(
@@ -35,9 +36,9 @@ class PublicRegistryClient:
         base = self._BASE_URLS.get(ecosystem)
         if base is None:
             return None
-        safe = "@/" if ecosystem == "npm" else ""
+        safe = "@/" if ecosystem in {"npm", "go"} else ""
         encoded_name = quote(name, safe=safe)
-        suffix = "/json" if ecosystem == "pypi" else ""
+        suffix = "/json" if ecosystem == "pypi" else "/@v/list" if ecosystem == "go" else ""
         return f"{base}{encoded_name}{suffix}"
 
     def check(self, ecosystem: str, name: str) -> RegistryResult:

@@ -29,6 +29,7 @@ _SUPPORTED_NAMES = {
     "package.json",
     "requirements.txt",
     "pyproject.toml",
+    "go.mod",
     "readme.md",
     "agents.md",
     "claude.md",

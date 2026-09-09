@@ -72,6 +72,8 @@ _JSON_DEPENDENCY_KEY = re.compile(r'^\s*"(?P<name>@?[^"\\]+)"\s*:')
 _POETRY_DEPENDENCY_KEY = re.compile(
     r"^\s*(?P<name>[A-Za-z0-9_.-]+)\s*=\s*"
 )
+_GO_REQUIRE = re.compile(r"^\s*require(?:\s*\(\s*)?(?P<body>.*)$")
+_GO_MODULE = re.compile(r"^(?P<name>[^\s]+)\s+(?P<version>v\d[^\s]+)(?:\s+//.*)?$")
 
 
 def _strip_npm_version(token: str) -> str:
@@ -306,6 +308,49 @@ def _extract_pyproject(path: str, content: str) -> list[PackageReference]:
     return references
 
 
+def _extract_go_mod(path: str, content: str) -> list[PackageReference]:
+    """Extract registry-backed module requirements without invoking Go."""
+
+    references: list[PackageReference] = []
+    in_require_block = False
+    for line_number, line in enumerate(content.splitlines(), start=1):
+        stripped = line.split("//", 1)[0].strip()
+        if not stripped or stripped.startswith("//"):
+            continue
+        if stripped.startswith("require"):
+            match = _GO_REQUIRE.match(stripped)
+            if not match:
+                raise ExtractionError(f"Malformed require directive at line {line_number}.")
+            body = match.group("body").strip()
+            if stripped.endswith("(") or body.startswith("("):
+                in_require_block = True
+                if body.startswith("("):
+                    body = body[1:].strip()
+            if body.endswith(")"):
+                body = body[:-1].strip()
+                in_require_block = False
+            if not body:
+                continue
+            stripped = body
+        elif stripped == ")" and in_require_block:
+            in_require_block = False
+            continue
+        elif not in_require_block:
+            continue
+
+        if "=>" in stripped:
+            continue
+        match = _GO_MODULE.match(stripped)
+        if not match:
+            raise ExtractionError(f"Malformed module requirement at line {line_number}.")
+        references.append(
+            PackageReference("go", match.group("name"), path, line_number, "require")
+        )
+    if in_require_block:
+        raise ExtractionError("Malformed require block: missing closing parenthesis.")
+    return references
+
+
 def extract_references(path: str | Path, content: str) -> list[PackageReference]:
     """Extract registry package references from one file."""
 
@@ -317,6 +362,8 @@ def extract_references(path: str | Path, content: str) -> list[PackageReference]
         references = _extract_requirements(display_path, content)
     elif name == "pyproject.toml":
         references = _extract_pyproject(display_path, content)
+    elif name == "go.mod":
+        references = _extract_go_mod(display_path, content)
     else:
         references = []
 

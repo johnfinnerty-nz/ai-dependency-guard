@@ -130,6 +130,32 @@ httpx = "^0.27"
             [("definitely-not-a-real-package-12345", 1)],
         )
 
+    def test_extracts_go_requirements_and_skips_local_replacements(self):
+        content = """module example.com/app
+
+require github.com/stretchr/testify v1.9.0
+
+require (
+    // test helper
+    golang.org/x/tools v0.24.0
+    example.com/local v0.0.0 => ../local
+)
+"""
+
+        references = extract_references("go.mod", content)
+
+        self.assertEqual(
+            [(item.ecosystem, item.name, item.line, item.source) for item in references],
+            [
+                ("go", "github.com/stretchr/testify", 3, "require"),
+                ("go", "golang.org/x/tools", 7, "require"),
+            ],
+        )
+
+    def test_rejects_malformed_go_requirements(self):
+        with self.assertRaisesRegex(ValueError, "Malformed module requirement"):
+            extract_references("go.mod", "require github.com/example/module\n")
+
 
 if __name__ == "__main__":
     unittest.main()
