@@ -72,8 +72,21 @@ _JSON_DEPENDENCY_KEY = re.compile(r'^\s*"(?P<name>@?[^"\\]+)"\s*:')
 _POETRY_DEPENDENCY_KEY = re.compile(
     r"^\s*(?P<name>[A-Za-z0-9_.-]+)\s*=\s*"
 )
-_GO_REQUIRE = re.compile(r"^\s*require(?:\s*\(\s*)?(?P<body>.*)$")
-_GO_MODULE = re.compile(r"^(?P<name>[^\s]+)\s+(?P<version>v\d[^\s]+)(?:\s+//.*)?$")
+_GO_REQUIRE = re.compile(r"^require\b(?P<body>.*)$")
+_GO_REPLACE = re.compile(r"^replace\b(?P<body>.*)$")
+_GO_TOKEN = re.compile(r'"(?:\\.|[^"\\])*"|\S+')
+_GO_VERSION = re.compile(r"^v\d\S*$")
+_GO_SIMPLE_ESCAPES = {
+    "a": "\a",
+    "b": "\b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "v": "\v",
+    "\\": "\\",
+    '"': '"',
+}
 
 
 def _strip_npm_version(token: str) -> str:
@@ -308,73 +321,200 @@ def _extract_pyproject(path: str, content: str) -> list[PackageReference]:
     return references
 
 
+def _strip_go_comment(line: str) -> str:
+    """Strip a Go line comment without treating slashes inside strings as comments."""
+
+    quote_character: str | None = None
+    escaped = False
+    for index, character in enumerate(line):
+        if quote_character == '"':
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote_character:
+                quote_character = None
+        elif quote_character == "`":
+            if character == quote_character:
+                quote_character = None
+        elif character in {'"', "`"}:
+            quote_character = character
+        elif character == "/" and index + 1 < len(line) and line[index + 1] == "/":
+            return line[:index]
+    return line
+
+
+def _unquote_go_string(token: str, line_number: int) -> str:
+    value: list[str] = []
+    index = 1
+    while index < len(token) - 1:
+        character = token[index]
+        if character != "\\":
+            value.append(character)
+            index += 1
+            continue
+
+        index += 1
+        if index >= len(token) - 1:
+            raise ExtractionError(f"Malformed quoted Go token at line {line_number}.")
+        escape = token[index]
+        if escape in _GO_SIMPLE_ESCAPES:
+            value.append(_GO_SIMPLE_ESCAPES[escape])
+            index += 1
+            continue
+
+        if escape in {"x", "u", "U"}:
+            width = {"x": 2, "u": 4, "U": 8}[escape]
+            digits = token[index + 1 : index + 1 + width]
+            if len(digits) != width or re.fullmatch(r"[0-9A-Fa-f]+", digits) is None:
+                raise ExtractionError(f"Malformed quoted Go token at line {line_number}.")
+            codepoint = int(digits, 16)
+            if escape != "x" and (
+                codepoint > 0x10FFFF or 0xD800 <= codepoint <= 0xDFFF
+            ):
+                raise ExtractionError(f"Malformed quoted Go token at line {line_number}.")
+            value.append(chr(codepoint))
+            index += width + 1
+            continue
+
+        if escape in "01234567":
+            digits = token[index : index + 3]
+            if len(digits) != 3 or re.fullmatch(r"[0-7]{3}", digits) is None:
+                raise ExtractionError(f"Malformed quoted Go token at line {line_number}.")
+            codepoint = int(digits, 8)
+            if codepoint > 0xFF:
+                raise ExtractionError(f"Malformed quoted Go token at line {line_number}.")
+            value.append(chr(codepoint))
+            index += 3
+            continue
+
+        raise ExtractionError(f"Malformed quoted Go token at line {line_number}.")
+    return "".join(value)
+
+
+def _unquote_go_token(token: str, line_number: int) -> str:
+    if token.startswith('"'):
+        if len(token) < 2 or not token.endswith('"'):
+            raise ExtractionError(f"Malformed quoted Go token at line {line_number}.")
+        return _unquote_go_string(token, line_number)
+    if any(character in token for character in "\"'`"):
+        raise ExtractionError(f"Malformed quoted Go token at line {line_number}.")
+    return token
+
+
+def _go_tokens(value: str, line_number: int) -> list[str]:
+    return [_unquote_go_token(token, line_number) for token in _GO_TOKEN.findall(value)]
+
+
+def _is_go_local_path(target: str) -> bool:
+    return (
+        target in {".", ".."}
+        or target.startswith(("./", ".\\", "../", "..\\", "/", "\\"))
+        or re.match(r"^[A-Za-z]:", target) is not None
+    )
+
+
+def _parse_go_replacement(
+    body: str, line_number: int
+) -> tuple[str, str | None] | None:
+    tokens = _go_tokens(body, line_number)
+    try:
+        separator = _GO_TOKEN.findall(body).index("=>")
+    except ValueError as exc:
+        raise ExtractionError(f"Malformed replace directive at line {line_number}.") from exc
+
+    original = tokens[:separator]
+    replacement = tokens[separator + 1 :]
+    if len(original) not in {1, 2} or not replacement:
+        raise ExtractionError(f"Malformed replace directive at line {line_number}.")
+
+    original_version = original[1] if len(original) == 2 else None
+    if original_version is not None and not _GO_VERSION.fullmatch(original_version):
+        raise ExtractionError(f"Malformed replace directive at line {line_number}.")
+
+    replacement_target = replacement[0]
+    if _is_go_local_path(replacement_target):
+        if len(replacement) != 1:
+            raise ExtractionError(f"Malformed replace directive at line {line_number}.")
+        return original[0], original_version
+    if len(replacement) != 2 or not _GO_VERSION.fullmatch(replacement[1]):
+        raise ExtractionError(f"Malformed replace directive at line {line_number}.")
+    return None
+
+
+def _parse_go_requirement(body: str, line_number: int) -> tuple[str, str]:
+    tokens = _go_tokens(body, line_number)
+    if len(tokens) != 2 or not tokens[0] or not _GO_VERSION.fullmatch(tokens[1]):
+        raise ExtractionError(f"Malformed module requirement at line {line_number}.")
+    return tokens[0], tokens[1]
+
+
 def _extract_go_mod(path: str, content: str) -> list[PackageReference]:
     """Extract registry-backed module requirements without invoking Go."""
 
-    local_replacements: set[str] = set()
+    local_replacements: set[tuple[str, str | None]] = set()
     in_replace_block = False
-    for line in content.splitlines():
-        stripped = line.split("//", 1)[0].strip()
+    for line_number, line in enumerate(content.splitlines(), start=1):
+        stripped = _strip_go_comment(line).strip()
         if not stripped:
             continue
-        if stripped == "replace (":
-            in_replace_block = True
-            continue
-        if stripped == ")" and in_replace_block:
-            in_replace_block = False
-            continue
-        if stripped.startswith("replace "):
-            stripped = stripped.removeprefix("replace ").strip()
-        elif not in_replace_block:
-            continue
-        if "=>" not in stripped:
-            continue
-        original, replacement = (part.strip() for part in stripped.split("=>", 1))
-        replacement_target = replacement.split()[0]
-        if replacement_target.startswith((".", "/")):
-            local_replacements.add(original.split()[0])
+        if in_replace_block:
+            if stripped == ")":
+                in_replace_block = False
+                continue
+            replacement = _parse_go_replacement(stripped, line_number)
+        else:
+            match = _GO_REPLACE.match(stripped)
+            if not match:
+                continue
+            body = match.group("body").strip()
+            if re.fullmatch(r"\(\s*\)", body):
+                continue
+            if body == "(":
+                in_replace_block = True
+                continue
+            if not body:
+                raise ExtractionError(f"Malformed replace directive at line {line_number}.")
+            replacement = _parse_go_replacement(body, line_number)
+        if replacement is not None:
+            local_replacements.add(replacement)
+    if in_replace_block:
+        raise ExtractionError("Malformed replace block: missing closing parenthesis.")
 
     references: list[PackageReference] = []
     in_require_block = False
     for line_number, line in enumerate(content.splitlines(), start=1):
-        stripped = line.split("//", 1)[0].strip()
-        if not stripped or stripped.startswith("//"):
+        stripped = _strip_go_comment(line).strip()
+        if not stripped:
             continue
-        if stripped.startswith("require"):
+        if in_require_block:
+            if stripped == ")":
+                in_require_block = False
+                continue
+            body = stripped
+        else:
             match = _GO_REQUIRE.match(stripped)
             if not match:
-                raise ExtractionError(f"Malformed require directive at line {line_number}.")
-            body = match.group("body").strip()
-            if stripped.endswith("(") or body.startswith("("):
-                in_require_block = True
-                if body.startswith("("):
-                    body = body[1:].strip()
-            if body.endswith(")"):
-                body = body[:-1].strip()
-                in_require_block = False
-            if not body:
                 continue
-            stripped = body
-        elif stripped == ")" and in_require_block:
-            in_require_block = False
-            continue
-        elif not in_require_block:
-            continue
+            body = match.group("body").strip()
+            if re.fullmatch(r"\(\s*\)", body):
+                continue
+            if body == "(":
+                in_require_block = True
+                continue
+            if not body:
+                raise ExtractionError(f"Malformed require directive at line {line_number}.")
 
-        if "=>" in stripped:
-            continue
-        match = _GO_MODULE.match(stripped)
-        if not match:
-            raise ExtractionError(f"Malformed module requirement at line {line_number}.")
-        if match.group("name") not in local_replacements:
+        name, version = _parse_go_requirement(body, line_number)
+        if (name, None) not in local_replacements and (name, version) not in local_replacements:
             references.append(
                 PackageReference(
                     "go",
-                    match.group("name"),
+                    name,
                     path,
                     line_number,
                     "require",
-                    match.group("version"),
+                    version,
                 )
             )
     if in_require_block:

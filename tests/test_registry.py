@@ -60,6 +60,23 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(result.status, "found")
         self.assertEqual(calls, ["https://pypi.org/pypi/requests/json"])
 
+    def test_uses_go_proxy_uppercase_escaping(self):
+        calls = []
+
+        def opener(request, timeout):
+            calls.append(request.full_url)
+            return FakeResponse(200, b"v1.4.0\n")
+
+        client = PublicRegistryClient(opener=opener)
+
+        result = client.check("go", "github.com/BurntSushi/toml")
+
+        self.assertEqual(result.status, "found")
+        self.assertEqual(
+            calls,
+            ["https://proxy.golang.org/github.com/!burnt!sushi/toml/@v/list"],
+        )
+
     def test_retries_rate_limit_then_succeeds(self):
         attempts = []
         sleeps = []

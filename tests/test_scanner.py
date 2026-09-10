@@ -1,4 +1,6 @@
+import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -108,6 +110,20 @@ class ScannerTests(unittest.TestCase):
             self.assertEqual(len(result.findings), 2)
             self.assertTrue(all(item.status == "error" for item in result.findings))
 
+    def test_reports_malformed_go_replace_as_a_file_parse_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "go.mod").write_text(
+                "module example.com/app\nreplace example.com/mod =>\n",
+                encoding="utf-8",
+            )
+
+            result = scan_path(root, offline=True)
+
+            self.assertEqual(len(result.findings), 1)
+            self.assertEqual(result.findings[0].package_name, "<file-parse-error>")
+            self.assertIn("Malformed replace directive", result.findings[0].reason)
+
     def test_scan_does_not_execute_shell_or_project_files(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -162,6 +178,113 @@ class ScannerTests(unittest.TestCase):
             self.assertEqual(first.findings[0].reason, second.findings[0].reason)
             self.assertEqual(first_registry.calls, [("npm", "definitely-not-a-real-package-12345")])
             self.assertEqual(second_registry.calls, [])
+
+    def test_go_cache_keeps_module_path_case_distinct(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache_file = root / "cache.json"
+            (root / "go.mod").write_text(
+                "module example.com/app\n\n"
+                "require (\n"
+                "    example.com/Case v1.0.0\n"
+                "    example.com/case v1.0.0\n"
+                ")\n",
+                encoding="utf-8",
+            )
+            first_registry = FakeRegistry(
+                {
+                    ("go", "example.com/Case"): RegistryResult(
+                        "found", "Uppercase exists."
+                    ),
+                    ("go", "example.com/case"): RegistryResult(
+                        "not_found", "Lowercase does not exist."
+                    ),
+                }
+            )
+            second_registry = FakeRegistry({})
+
+            first = scan_path(root, registry=first_registry, cache_file=cache_file)
+            second = scan_path(root, registry=second_registry, cache_file=cache_file)
+
+            self.assertEqual(
+                first_registry.calls,
+                [("go", "example.com/Case"), ("go", "example.com/case")],
+            )
+            self.assertEqual(second_registry.calls, [])
+            self.assertEqual(
+                [(item.package_name, item.reason) for item in first.findings],
+                [("example.com/case", "Lowercase does not exist.")],
+            )
+            self.assertEqual(
+                [(item.package_name, item.reason) for item in second.findings],
+                [("example.com/case", "Lowercase does not exist.")],
+            )
+            cache_payload = json.loads(cache_file.read_text(encoding="utf-8"))
+            self.assertEqual(cache_payload["version"], 2)
+            self.assertIn("go:example.com/Case", cache_payload["entries"])
+            self.assertIn("go:example.com/case", cache_payload["entries"])
+
+    def test_invalidates_legacy_go_cache_entries_but_preserves_other_ecosystems(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache_file = root / "cache.json"
+            checked_at = time.time()
+            (root / "go.mod").write_text(
+                "module example.com/app\nrequire example.com/case v1.0.0\n",
+                encoding="utf-8",
+            )
+            (root / "package.json").write_text(
+                '{"dependencies":{"express":"1.0.0"}}\n', encoding="utf-8"
+            )
+            (root / "requirements.txt").write_text("requests\n", encoding="utf-8")
+            cache_file.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "entries": {
+                            "go:example.com/case": {
+                                "status": "found",
+                                "message": "Legacy ambiguous Go result.",
+                                "checked_at": checked_at,
+                            },
+                            "npm:express": {
+                                "status": "found",
+                                "message": "Cached npm result.",
+                                "checked_at": checked_at,
+                            },
+                            "pypi:requests": {
+                                "status": "found",
+                                "message": "Cached PyPI result.",
+                                "checked_at": checked_at,
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            registry = FakeRegistry(
+                {
+                    ("go", "example.com/case"): RegistryResult(
+                        "not_found", "Lowercase module does not exist."
+                    )
+                }
+            )
+
+            result = scan_path(root, registry=registry, cache_file=cache_file)
+
+            self.assertEqual(registry.calls, [("go", "example.com/case")])
+            self.assertEqual(
+                [(item.package_name, item.reason) for item in result.findings],
+                [("example.com/case", "Lowercase module does not exist.")],
+            )
+            cache_payload = json.loads(cache_file.read_text(encoding="utf-8"))
+            self.assertEqual(cache_payload["version"], 2)
+            self.assertEqual(
+                cache_payload["entries"]["go:example.com/case"]["status"],
+                "not_found",
+            )
+            self.assertIn("npm:express", cache_payload["entries"])
+            self.assertIn("pypi:requests", cache_payload["entries"])
 
     def test_ignores_configured_glob_paths(self):
         with tempfile.TemporaryDirectory() as directory:

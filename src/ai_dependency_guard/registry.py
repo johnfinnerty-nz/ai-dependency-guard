@@ -11,6 +11,15 @@ from urllib.request import Request, urlopen
 from .models import RegistryResult
 
 
+def _escape_go_proxy_path(path: str) -> str:
+    """Apply the Go proxy's case-sensitive module path escaping."""
+
+    return "".join(
+        f"!{character.lower()}" if "A" <= character <= "Z" else character
+        for character in path
+    )
+
+
 class PublicRegistryClient:
     """Look up package existence without requiring credentials."""
 
@@ -36,8 +45,11 @@ class PublicRegistryClient:
         base = self._BASE_URLS.get(ecosystem)
         if base is None:
             return None
-        safe = "@/" if ecosystem in {"npm", "go"} else ""
-        encoded_name = quote(name, safe=safe)
+        if ecosystem == "go":
+            encoded_name = quote(_escape_go_proxy_path(name), safe="/!")
+        else:
+            safe = "@/" if ecosystem == "npm" else ""
+            encoded_name = quote(name, safe=safe)
         suffix = "/json" if ecosystem == "pypi" else "/@v/list" if ecosystem == "go" else ""
         return f"{base}{encoded_name}{suffix}"
 

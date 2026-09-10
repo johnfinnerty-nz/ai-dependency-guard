@@ -1,6 +1,6 @@
 import unittest
 
-from ai_dependency_guard.extractors import extract_references
+from ai_dependency_guard.extractors import ExtractionError, extract_references
 
 
 class ExtractorTests(unittest.TestCase):
@@ -160,6 +160,91 @@ replace example.com/local => ../local
     def test_rejects_malformed_go_requirements(self):
         with self.assertRaisesRegex(ValueError, "Malformed module requirement"):
             extract_references("go.mod", "require github.com/example/module\n")
+
+    def test_applies_local_replacements_to_the_matching_version_only(self):
+        content = """module example.com/app
+
+require (
+    example.com/mod v1.0.0
+    example.com/mod v1.2.3
+)
+
+replace example.com/mod v1.0.0 => ../local
+"""
+
+        references = extract_references("go.mod", content)
+
+        self.assertEqual(
+            [(item.name, item.version) for item in references],
+            [("example.com/mod", "v1.2.3")],
+        )
+
+    def test_handles_tabs_quoted_paths_and_windows_local_replacements(self):
+        content = '''module example.com/app
+
+require (
+    "example.com/quoted" v1.0.0
+    example.com/relative-local v1.0.0
+    example.com/windows-local v1.0.0
+    example.com/remote v1.0.0
+)
+
+replace\t(
+    example.com/relative-local => "../local"
+    example.com/windows-local => "C:/local"
+)
+'''
+
+        references = extract_references("go.mod", content)
+
+        self.assertEqual(
+            [(item.name, item.version) for item in references],
+            [
+                ("example.com/quoted", "v1.0.0"),
+                ("example.com/remote", "v1.0.0"),
+            ],
+        )
+
+    def test_decodes_go_hex_and_octal_escapes_in_quoted_module_paths(self):
+        content = r'''module example.com/app
+
+require (
+    "example.com/\x6dod" v1.0.0
+    "example.com/\155ore" v1.1.0
+)
+'''
+
+        references = extract_references("go.mod", content)
+
+        self.assertEqual(
+            [(item.name, item.version) for item in references],
+            [
+                ("example.com/mod", "v1.0.0"),
+                ("example.com/more", "v1.1.0"),
+            ],
+        )
+
+    def test_accepts_empty_go_directive_blocks(self):
+        content = "module example.com/app\nrequire ()\nreplace ( )\n"
+        self.assertEqual(extract_references("go.mod", content), [])
+
+    def test_rejects_a_quoted_replacement_separator(self):
+        for separator in ('"=>"', r'"\x3d>"'):
+            with self.subTest(separator=separator):
+                content = (
+                    "module example.com/app\nrequire example.com/mod v1.0.0\n"
+                    f"replace example.com/mod {separator} ../local\n"
+                )
+                with self.assertRaisesRegex(ExtractionError, "Malformed replace directive"):
+                    extract_references("go.mod", content)
+
+    def test_rejects_replace_with_an_empty_right_hand_side(self):
+        content = "module example.com/app\nreplace example.com/mod =>\n"
+
+        with self.assertRaisesRegex(
+            ExtractionError, "Malformed replace directive at line 2"
+        ):
+            extract_references("go.mod", content)
 
 
 if __name__ == "__main__":

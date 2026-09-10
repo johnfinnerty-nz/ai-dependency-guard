@@ -107,6 +107,12 @@ def _finding_for_extraction_error(path: str, error: ExtractionError) -> Finding:
     )
 
 
+def _registry_cache_name(ecosystem: str, name: str) -> str:
+    """Preserve names for case-sensitive registries while normalizing the others."""
+
+    return name if ecosystem == "go" else name.lower()
+
+
 def _load_registry_cache(cache_file: Path | None, cache_ttl: float) -> dict:
     if cache_file is None or not cache_file.exists():
         return {}
@@ -116,12 +122,15 @@ def _load_registry_cache(cache_file: Path | None, cache_ttl: float) -> dict:
         return {}
     if not isinstance(payload, dict):
         return {}
+    cache_version = payload.get("version")
     now = time.time()
     entries = payload.get("entries", {})
     if not isinstance(entries, dict):
         return {}
     valid = {}
     for key, value in entries.items():
+        if key.startswith("go:") and cache_version != 2:
+            continue
         if not isinstance(value, dict):
             continue
         checked_at = value.get("checked_at")
@@ -138,7 +147,7 @@ def _load_registry_cache(cache_file: Path | None, cache_ttl: float) -> dict:
 def _save_registry_cache(cache_file: Path | None, entries: dict) -> None:
     if cache_file is None:
         return
-    payload = {"version": 1, "entries": entries}
+    payload = {"version": 2, "entries": entries}
     try:
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         temporary = cache_file.with_name(f"{cache_file.name}.tmp")
@@ -204,9 +213,10 @@ def scan_path(
         for reference in references:
             if reference.name.lower() in ignored:
                 continue
-            key = (reference.ecosystem, reference.name.lower())
+            cache_name = _registry_cache_name(reference.ecosystem, reference.name)
+            key = (reference.ecosystem, cache_name)
             if key not in lookup_cache:
-                cache_key = f"{reference.ecosystem}:{reference.name.lower()}"
+                cache_key = f"{reference.ecosystem}:{cache_name}"
                 cached = disk_cache.get(cache_key)
                 if offline:
                     lookup_cache[key] = RegistryResult(
