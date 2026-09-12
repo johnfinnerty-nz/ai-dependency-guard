@@ -74,6 +74,11 @@ def _is_ignored_path(relative: str, patterns: set[str]) -> bool:
 def _finding_for_reference(reference, result: RegistryResult) -> Finding:
     if result.status == "not_found":
         suggestion = "Verify the exact package name before installing it."
+        if reference.ecosystem == "go":
+            suggestion = (
+                "Verify the module path and version. Private modules may not be "
+                "available from the public Go proxy."
+            )
         severity = "error"
     elif result.status == "unknown":
         suggestion = "Run the scan again with network access before treating this as clean."
@@ -129,7 +134,7 @@ def _load_registry_cache(cache_file: Path | None, cache_ttl: float) -> dict:
         return {}
     valid = {}
     for key, value in entries.items():
-        if key.startswith("go:") and cache_version != 2:
+        if key.startswith("go:") and cache_version != 4:
             continue
         if not isinstance(value, dict):
             continue
@@ -147,7 +152,7 @@ def _load_registry_cache(cache_file: Path | None, cache_ttl: float) -> dict:
 def _save_registry_cache(cache_file: Path | None, entries: dict) -> None:
     if cache_file is None:
         return
-    payload = {"version": 2, "entries": entries}
+    payload = {"version": 4, "entries": entries}
     try:
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         temporary = cache_file.with_name(f"{cache_file.name}.tmp")
@@ -179,7 +184,7 @@ def scan_path(
     ignored = {item.strip().lower() for item in (ignore_packages or set()) if item.strip()}
     ignored_paths = {item for item in (ignore_paths or set()) if item.strip()}
     result = ScanResult()
-    lookup_cache: dict[tuple[str, str], RegistryResult] = {}
+    lookup_cache: dict[tuple[str, str, str], RegistryResult] = {}
     disk_cache_path = Path(cache_file).resolve() if cache_file is not None else None
     disk_cache = _load_registry_cache(disk_cache_path, cache_ttl)
 
@@ -211,12 +216,16 @@ def scan_path(
 
         result.references_scanned += len(references)
         for reference in references:
-            if reference.name.lower() in ignored:
+            # Exclude either identity before looking at caches or making requests.
+            if reference.name.lower() in ignored or reference.declared_name.lower() in ignored:
                 continue
             cache_name = _registry_cache_name(reference.ecosystem, reference.name)
-            key = (reference.ecosystem, cache_name)
+            version = reference.version if reference.ecosystem == "go" else ""
+            key = (reference.ecosystem, cache_name, version)
             if key not in lookup_cache:
                 cache_key = f"{reference.ecosystem}:{cache_name}"
+                if version:
+                    cache_key += f"@{version}"
                 cached = disk_cache.get(cache_key)
                 if offline:
                     lookup_cache[key] = RegistryResult(
@@ -225,7 +234,14 @@ def scan_path(
                 elif cached:
                     lookup_cache[key] = RegistryResult(cached["status"], cached["message"])
                 else:
-                    lookup_cache[key] = registry_client.check(reference.ecosystem, reference.name)
+                    if reference.ecosystem == "go":
+                        lookup_cache[key] = registry_client.check(
+                            reference.ecosystem, reference.name, version=version
+                        )
+                    else:
+                        lookup_cache[key] = registry_client.check(
+                            reference.ecosystem, reference.name
+                        )
                     registry_result = lookup_cache[key]
                     if registry_result.status in {"found", "not_found"}:
                         disk_cache[cache_key] = {

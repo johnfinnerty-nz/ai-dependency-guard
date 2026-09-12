@@ -13,7 +13,7 @@ class FakeRegistry:
         self.results = results
         self.calls = []
 
-    def check(self, ecosystem, name):
+    def check(self, ecosystem, name, version=""):
         self.calls.append((ecosystem, name))
         return self.results.get(
             (ecosystem, name),
@@ -220,9 +220,9 @@ class ScannerTests(unittest.TestCase):
                 [("example.com/case", "Lowercase does not exist.")],
             )
             cache_payload = json.loads(cache_file.read_text(encoding="utf-8"))
-            self.assertEqual(cache_payload["version"], 2)
-            self.assertIn("go:example.com/Case", cache_payload["entries"])
-            self.assertIn("go:example.com/case", cache_payload["entries"])
+            self.assertEqual(cache_payload["version"], 4)
+            self.assertIn("go:example.com/Case@v1.0.0", cache_payload["entries"])
+            self.assertIn("go:example.com/case@v1.0.0", cache_payload["entries"])
 
     def test_invalidates_legacy_go_cache_entries_but_preserves_other_ecosystems(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -278,9 +278,9 @@ class ScannerTests(unittest.TestCase):
                 [("example.com/case", "Lowercase module does not exist.")],
             )
             cache_payload = json.loads(cache_file.read_text(encoding="utf-8"))
-            self.assertEqual(cache_payload["version"], 2)
+            self.assertEqual(cache_payload["version"], 4)
             self.assertEqual(
-                cache_payload["entries"]["go:example.com/case"]["status"],
+                cache_payload["entries"]["go:example.com/case@v1.0.0"]["status"],
                 "not_found",
             )
             self.assertIn("npm:express", cache_payload["entries"])

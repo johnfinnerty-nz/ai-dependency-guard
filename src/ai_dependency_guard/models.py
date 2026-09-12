@@ -11,6 +11,9 @@ class PackageReference:
     line: int
     source: str = ""
     version: str = ""
+    # Preserve the declaration when name/version refer to a remote replacement.
+    declared_name: str = ""
+    declared_version: str = ""
 
 
 @dataclass(frozen=True)

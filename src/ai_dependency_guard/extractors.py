@@ -416,7 +416,7 @@ def _is_go_local_path(target: str) -> bool:
 
 def _parse_go_replacement(
     body: str, line_number: int
-) -> tuple[str, str | None] | None:
+) -> tuple[str, str | None, tuple[str, str]]:
     tokens = _go_tokens(body, line_number)
     try:
         separator = _GO_TOKEN.findall(body).index("=>")
@@ -436,10 +436,10 @@ def _parse_go_replacement(
     if _is_go_local_path(replacement_target):
         if len(replacement) != 1:
             raise ExtractionError(f"Malformed replace directive at line {line_number}.")
-        return original[0], original_version
+        return original[0], original_version, (replacement_target, "")
     if len(replacement) != 2 or not _GO_VERSION.fullmatch(replacement[1]):
         raise ExtractionError(f"Malformed replace directive at line {line_number}.")
-    return None
+    return original[0], original_version, (replacement_target, replacement[1])
 
 
 def _parse_go_requirement(body: str, line_number: int) -> tuple[str, str]:
@@ -452,7 +452,8 @@ def _parse_go_requirement(body: str, line_number: int) -> tuple[str, str]:
 def _extract_go_mod(path: str, content: str) -> list[PackageReference]:
     """Extract registry-backed module requirements without invoking Go."""
 
-    local_replacements: set[tuple[str, str | None]] = set()
+    # Keep local targets too, so conflicting local replacements are not lost.
+    replacements: dict[tuple[str, str | None], tuple[str, str, int]] = {}
     in_replace_block = False
     for line_number, line in enumerate(content.splitlines(), start=1):
         stripped = _strip_go_comment(line).strip()
@@ -476,8 +477,17 @@ def _extract_go_mod(path: str, content: str) -> list[PackageReference]:
             if not body:
                 raise ExtractionError(f"Malformed replace directive at line {line_number}.")
             replacement = _parse_go_replacement(body, line_number)
-        if replacement is not None:
-            local_replacements.add(replacement)
+        original_name, original_version, target = replacement
+        key = (original_name, original_version)
+        if key in replacements:
+            previous = replacements[key]
+            if previous[:2] != target:
+                raise ExtractionError(
+                    f"Conflicting replace directives at lines {previous[2]} and {line_number}."
+                )
+            # Repeated identical directives are valid; keep the first location.
+            continue
+        replacements[key] = (target[0], target[1], line_number)
     if in_replace_block:
         raise ExtractionError("Malformed replace block: missing closing parenthesis.")
 
@@ -506,7 +516,18 @@ def _extract_go_mod(path: str, content: str) -> list[PackageReference]:
                 raise ExtractionError(f"Malformed require directive at line {line_number}.")
 
         name, version = _parse_go_requirement(body, line_number)
-        if (name, None) not in local_replacements and (name, version) not in local_replacements:
+        key = (name, version) if (name, version) in replacements else (name, None)
+        if key in replacements:
+            # Apply once: Go does not recursively replace the replacement target.
+            target_name, target_version, target_line = replacements[key]
+            if target_version:
+                references.append(
+                    PackageReference(
+                        "go", target_name, path, target_line, "replace", target_version,
+                        declared_name=name, declared_version=version,
+                    )
+                )
+        else:
             references.append(
                 PackageReference(
                     "go",
